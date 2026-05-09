@@ -142,7 +142,39 @@ def get_dataset(
         itos          (dict[int, str])
     """
     # TODO 1.1: implement
-    raise NotImplementedError
+    # raise NotImplementedError
+     # Step 1: create data directory
+    os.makedirs(data_root, exist_ok=True)
+ 
+    # Step 2: download if not present
+    filepath = os.path.join(data_root, "input.txt")
+    if not os.path.isfile(filepath):
+        print(f"  Downloading TinyShakespeare to {filepath} …")
+        urllib.request.urlretrieve(DATA_URL, filepath)
+ 
+    # Step 3: read text
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read()
+ 
+    # Step 4: build vocabulary
+    chars = sorted(set(text))
+    vocab_size = len(chars)
+    stoi = {ch: i for i, ch in enumerate(chars)}
+    itos = {i: ch for i, ch in enumerate(chars)}
+ 
+    # Step 5: encode entire text as LongTensor
+    encoded = torch.tensor([stoi[c] for c in text], dtype=torch.long)
+ 
+    # Step 6: split into train / val
+    n = int(len(encoded) * train_frac)
+    train_data = encoded[:n]
+    val_data   = encoded[n:]
+ 
+    # Step 7: wrap in CharDataset
+    train_dataset = CharDataset(train_data, block_size)
+    val_dataset   = CharDataset(val_data,   block_size)
+ 
+    return train_dataset, val_dataset, vocab_size, stoi, itos
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +223,24 @@ class CausalSelfAttention(nn.Module):
         # store self.num_heads, self.head_dim (= embed_dim // num_heads), self.embed_dim
         # create self.qkv, self.out_proj, self.attn_drop, self.resid_drop
         # create the causal mask and register it as a buffer named "mask"
-        raise NotImplementedError
+        #raise NotImplementedError
+        assert embed_dim % num_heads == 0, \
+            f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+ 
+        self.num_heads = num_heads
+        self.head_dim  = embed_dim // num_heads
+        self.embed_dim = embed_dim
+ 
+        # Combined Q, K, V projection
+        self.qkv      = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
+        self.out_proj = nn.Linear(embed_dim, embed_dim,     bias=False)
+        self.attn_drop  = nn.Dropout(dropout)
+        self.resid_drop = nn.Dropout(dropout)
+ 
+        # Causal mask: lower-triangular (1, 1, block_size, block_size)
+        mask = torch.tril(torch.ones(block_size, block_size)).unsqueeze(0).unsqueeze(0)
+        self.register_buffer("mask", mask)
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO 1.2 – forward:
@@ -203,7 +252,39 @@ class CausalSelfAttention(nn.Module):
         # 6. Softmax over the last dimension, then apply self.attn_drop
         # 7. Multiply by v, reshape back to (B, T, C)
         # 8. Apply self.out_proj and self.resid_drop
-        raise NotImplementedError
+        # raise NotImplementedError
+        B, T, C = x.shape
+ 
+        # Project and split into Q, K, V each (B, T, C)
+        qkv = self.qkv(x)                          # (B, T, 3C)
+        q, k, v = qkv.split(self.embed_dim, dim=2) # each (B, T, C)
+ 
+        # Reshape to (B, num_heads, T, head_dim)
+        q = q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+ 
+        # Scaled dot-product attention scores
+        scale  = self.head_dim ** -0.5
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, h, T, T)
+ 
+        # Apply causal mask: fill future positions with -inf
+        scores = scores.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
+ 
+        # Softmax + dropout
+        attn = F.softmax(scores, dim=-1)
+        attn = self.attn_drop(attn)
+ 
+        # Weighted sum over values
+        out = torch.matmul(attn, v)                # (B, h, T, head_dim)
+        out = out.transpose(1, 2).contiguous().reshape(B, T, C)  # (B, T, C)
+ 
+        # Output projection + residual dropout
+        out = self.out_proj(out)
+        out = self.resid_drop(out)
+        return out
+ 
+
 
 
 # ---------------------------------------------------------------------------
@@ -250,11 +331,28 @@ class GPTBlock(nn.Module):
     ):
         super().__init__()
         # TODO 1.3 – __init__: create norm1, attn, norm2, mlp
-        raise NotImplementedError
+        #raise NotImplementedError
+
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn  = CausalSelfAttention(embed_dim, num_heads, block_size, dropout)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.mlp   = nn.Sequential(
+            nn.Linear(embed_dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # TODO 1.3 – forward: apply pre-norm residual connections
-        raise NotImplementedError
+        #raise NotImplementedError
+        # Pre-norm attention sub-layer
+        x = x + self.attn(self.norm1(x))
+        # Pre-norm MLP sub-layer
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +414,22 @@ class GPT(nn.Module):
         super().__init__()
         self.block_size = block_size
         # TODO 1.4 – __init__: create all sub-modules and tie weights
-        raise NotImplementedError
+        #raise NotImplementedError
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embedding   = nn.Embedding(block_size, embed_dim)
+        self.drop            = nn.Dropout(dropout)
+ 
+        self.blocks = nn.ModuleList([
+            GPTBlock(embed_dim, num_heads, block_size, mlp_dim, dropout)
+            for _ in range(num_layers)
+        ])
+ 
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, vocab_size, bias=False)
+ 
+        # Weight tying: share embedding matrix with output head
+        self.head.weight = self.token_embedding.weight
+ 
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         # TODO 1.4 – forward:
@@ -324,7 +437,25 @@ class GPT(nn.Module):
         # 2. Compute token and position embeddings; add them; apply dropout
         # 3. Pass through each block in self.blocks
         # 4. Apply self.norm and self.head
-        raise NotImplementedError
+        #raise NotImplementedError
+        B, T = idx.shape
+        assert T <= self.block_size, \
+            f"Sequence length {T} exceeds block_size {self.block_size}"
+ 
+        # Token + position embeddings
+        positions = torch.arange(T, device=idx.device)          
+        tok_emb = self.token_embedding(idx)                      
+        pos_emb = self.pos_embedding(positions)                 
+        x = self.drop(tok_emb + pos_emb)                         
+ 
+        # Transformer blocks
+        for block in self.blocks:
+            x = block(x)
+ 
+        # Final norm and LM head
+        x      = self.norm(x)                                    
+        logits = self.head(x)                                   
+        return logits
 
 
 def build_model(config: dict, vocab_size: int) -> "GPT":
