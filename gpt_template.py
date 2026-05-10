@@ -528,7 +528,117 @@ def train_model(
     dict : the training log (same as what is written to log_path)
     """
     # TODO 1.5: implement
-    raise NotImplementedError
+    # raise NotImplementedError
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+ 
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config["lr"], weight_decay=1e-2
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config["epochs"]
+    )
+ 
+    total_params = sum(p.numel() for p in model.parameters())
+    history = []
+ 
+    for epoch in range(1, config["epochs"] + 1):
+        epoch_start = time.time()
+        model.train()
+ 
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+        )
+        train_iter  = iter(train_loader)
+        total_loss  = 0.0
+        steps_done  = 0
+ 
+        while steps_done < config["steps_per_epoch"]:
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+ 
+            optimizer.zero_grad()
+            logits = model(x)                              
+            B, T, V = logits.shape
+            loss = F.cross_entropy(
+                logits.reshape(B * T, V),
+                y.reshape(B * T),
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+ 
+            total_loss += loss.item()
+            steps_done += 1
+ 
+        train_loss = total_loss / steps_done
+ 
+        model.eval()
+        val_loader = DataLoader(
+            val_dataset, batch_size=config["batch_size"], shuffle=False
+        )
+        val_loss_total = 0.0
+        val_batches    = 0
+        with torch.no_grad():
+            for x_val, y_val in val_loader:
+                if val_batches >= 50:
+                    break
+                logits_val = model(x_val)
+                Bv, Tv, Vv = logits_val.shape
+                loss_val = F.cross_entropy(
+                    logits_val.reshape(Bv * Tv, Vv),
+                    y_val.reshape(Bv * Tv),
+                )
+                val_loss_total += loss_val.item()
+                val_batches    += 1
+ 
+        val_loss   = val_loss_total / max(val_batches, 1)
+        epoch_time = time.time() - epoch_start
+ 
+        scheduler.step()
+ 
+        history.append({
+            "epoch":          epoch,
+            "train_loss":     round(train_loss, 4),
+            "val_loss":       round(val_loss,   4),
+            "epoch_time_sec": round(epoch_time, 4),
+        })
+ 
+        print(
+            f"  Epoch {epoch}/{config['epochs']}  "
+            f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+            f"time={epoch_time:.1f}s"
+        )
+ 
+        if epoch in CHECKPOINT_EPOCHS:
+            ckpt_path = os.path.join(checkpoint_dir, f"gpt_epoch_{epoch}.pt")
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "config": {k: config[k] for k in
+                           ["block_size", "embed_dim", "num_heads",
+                            "num_layers", "mlp_dim", "dropout"]},
+                "epoch": epoch,
+            }, ckpt_path)
+            print(f"  Checkpoint saved → {ckpt_path}")
+ 
+    log = {
+        "seed": SEED,
+        "config":{k: config[k] for k in [ "block_size", "embed_dim", "num_heads", "num_layers", "mlp_dim", "dropout",  "lr", "batch_size", "epochs", "steps_per_epoch"]},
+        "history":         history,
+        "final_val_loss":  history[-1]["val_loss"],
+        "total_params":    total_params,
+    }
+ 
+    with open(log_path, "w") as f:
+        json.dump(log, f, indent=2)
+    print(f"  Saved → {log_path}")
+ 
+    return log
 
 
 # ---------------------------------------------------------------------------
