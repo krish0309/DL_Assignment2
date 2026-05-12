@@ -682,7 +682,33 @@ def generate(
         str : full generated text (prompt + new characters)
     """
     # TODO 1.6: implement
-    raise NotImplementedError
+    #raise NotImplementedError
+
+    model.eval()
+ 
+    # Encode prompt to list of token indices
+    context = [stoi[c] for c in prompt]
+ 
+    with torch.no_grad():
+        for itr in range(max_new_tokens):
+            
+            ctx = context[-model.block_size:]
+            ctx_tensor = torch.tensor(ctx, dtype=torch.long).unsqueeze(0) 
+ 
+            # Forward pass
+            logits = model(ctx_tensor)         
+            logits_last = logits[0, -1, :]     
+ 
+            # Temperature scaling and applyoing softmax
+            probs = F.softmax(logits_last / temperature, dim=-1)
+ 
+            # Sampling  next token
+            next_token = torch.multinomial(probs, num_samples=1).item()
+            context.append(next_token)
+ 
+    # Decode full context back to string
+    return "".join(itos[i] for i in context)
+ 
 
 
 # ---------------------------------------------------------------------------
